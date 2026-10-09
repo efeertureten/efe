@@ -2,8 +2,7 @@
 
 Tarayıcıda çalışan, Three.js ile yapılmış küçük bir 3D tabanca oyunu.
 
-**Oyna:** https://efeertureten.github.io/efe/
-
+**Oyna** 
 ## Kontroller
 
 | Bilgisayar | Telefon |

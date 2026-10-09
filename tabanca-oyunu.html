@@ -1,0 +1,785 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Mat Siyah Tabanca</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@500;600;700&display=swap">
+<style>
+  /* Düzen: tam ekran 3D sahne; arayüz köşelere sabitlenmiş küçük, sade katmanlar */
+  :root {
+    --bg: #eceef1;        /* açık gri sahne zemini */
+    --ink: #1c1e22;       /* ana metin, koyu buton */
+    --muted: #7d838d;     /* ikincil metin */
+    --soft: #b9bec6;      /* ayraçlar */
+    --danger: #d23a2c;    /* az / boş mermi */
+    --chip: #ffffffd9;    /* yarı saydam buton zemini */
+    --font-ui: "Barlow Semi Condensed", "Arial Narrow", "Helvetica Neue", Arial, sans-serif;
+    color-scheme: light;
+  }
+
+  html, body { height: 100%; margin: 0; overflow: hidden; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--font-ui);
+    -webkit-user-select: none; user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* 3D tuval tüm ekranı kaplar */
+  #scene { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; outline: none; }
+
+  /* ---- Sağ alt: mermi sayacı ---- */
+  .ammo {
+    position: fixed;
+    right: calc(20px + env(safe-area-inset-right, 0px));
+    bottom: calc(18px + env(safe-area-inset-bottom, 0px));
+    text-align: right;
+    pointer-events: none;
+    font-variant-numeric: tabular-nums;
+    transition: opacity .2s;
+  }
+  .ammo-row { font-size: 40px; font-weight: 700; line-height: 1; color: var(--ink); transition: color .2s; }
+  .ammo-row .rest { font-size: 26px; font-weight: 500; color: var(--muted); transition: color .2s; }
+  .ammo.low .ammo-row, .ammo.low .ammo-row .rest { color: var(--danger); }
+  .ammo.busy { opacity: .45; }
+  .ammo-warn {
+    margin-top: 6px;
+    font-size: 14px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--danger);
+    animation: blink 1s steps(2, start) infinite;
+  }
+  @keyframes blink { to { visibility: hidden; } }
+
+  /* ---- Sol alt: kontrol ipuçları ---- */
+  .hints {
+    position: fixed;
+    left: calc(20px + env(safe-area-inset-left, 0px));
+    bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+    max-width: 52vw;
+    font-size: 14px; font-weight: 500; letter-spacing: .02em;
+    color: var(--muted);
+    pointer-events: none;
+  }
+  .hints i { font-style: normal; color: var(--soft); padding: 0 .35em; }
+
+  /* ---- Dokunmatik butonlar (yalnızca telefonda görünür) ---- */
+  .touch {
+    position: fixed;
+    right: calc(16px + env(safe-area-inset-right, 0px));
+    bottom: calc(92px + env(safe-area-inset-bottom, 0px));
+    display: none;
+    align-items: center;
+    gap: 12px;
+  }
+  .touch button {
+    font-family: var(--font-ui); font-weight: 700; letter-spacing: .08em;
+    border: 0; cursor: pointer; touch-action: none;
+    transition: transform .08s;
+  }
+  .touch button:active { transform: scale(.94); }
+  .touch button:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+  #btnReload { height: 44px; padding: 0 18px; border-radius: 22px; font-size: 15px; background: var(--chip); color: var(--ink); box-shadow: inset 0 0 0 1.5px var(--soft); }
+  #btnFire { width: 78px; height: 78px; border-radius: 50%; font-size: 18px; background: var(--ink); color: var(--bg); }
+  @media (hover: none) and (pointer: coarse) { .touch { display: flex; } }
+
+  @media (prefers-reduced-motion: reduce) { .ammo-warn { animation: none; } }
+</style>
+</head>
+<body>
+<canvas id="scene" aria-label="3D tabanca sahnesi"></canvas>
+
+<div class="hints" id="hints">Sürükle: Döndür<i>|</i>Tık/Space: Ateş<i>|</i>R: Şarjör</div>
+
+<div class="ammo" id="ammo" aria-live="polite">
+  <div class="ammo-row"><span id="ammoNow">12</span><span class="rest"> / <span id="ammoMax">12</span></span></div>
+  <div class="ammo-warn" id="ammoWarn" hidden>R ile şarjör değiştir</div>
+</div>
+
+<div class="touch" id="touch">
+  <button id="btnReload" type="button">ŞARJÖR</button>
+  <button id="btnFire" type="button">ATEŞ</button>
+</div>
+
+<!-- Three.js ve OrbitControls (r147, global THREE nesnesi tanımlar) -->
+<script src="https://cdn.jsdelivr.net/npm/three@0.147.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/controls/OrbitControls.js"></script>
+
+<script>
+(() => {
+  'use strict';
+
+  /* =========================================================
+     1) SABİTLER VE OYUN DURUMU
+     ========================================================= */
+  const MAX_AMMO   = 12;      // şarjör kapasitesi
+  const FLOOR_Y    = -3.1;    // zeminin yüksekliği
+  const GRAVITY    = 14;      // görsel olarak ayarlanmış yerçekimi
+  const SLIDE_BACK = 0.55;    // kızağın geri gitme mesafesi
+  const GRIP_TILT  = 0.2;     // kabza eğimi (radyan)
+
+  const state = {
+    ammo: MAX_AMMO,
+    reloading: false,   // şarjör değişiyor mu?
+    cycling: false,     // kızak hareket halinde mi?
+    slideLocked: false  // son mermiden sonra kızak geride kilitli mi?
+  };
+
+  const isTouch = matchMedia('(hover: none) and (pointer: coarse)').matches;
+
+  /* =========================================================
+     2) RENDERER, SAHNE, KAMERA, IŞIKLAR
+     ========================================================= */
+  const canvas = document.getElementById('scene');
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(innerWidth, innerHeight);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0xeceef1);
+
+  const camera = new THREE.PerspectiveCamera(35, innerWidth / innerHeight, 0.1, 100);
+  const camTarget = new THREE.Vector3(-0.15, -0.95, 0);
+  const camDir = new THREE.Vector3(-0.3, 0.34, 1).normalize();  // hafif yukarıdan, sol-ön çaprazdan bakış
+
+  // Tabancanın ekrana sığacağı mesafeyi hesapla (telefon dikey ekranı dahil)
+  function fitCamera() {
+    const halfTan = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+    const aspect = innerWidth / innerHeight;
+    const dist = Math.max(2.7 / halfTan, 2.2 / (halfTan * aspect));
+    camera.position.copy(camTarget).addScaledVector(camDir, dist);
+    camera.lookAt(camTarget);
+  }
+  fitCamera();
+
+  // Ortam ışığı (gökyüzü/zemin tonlu) + tek ana ışık (gölge düşürür)
+  scene.add(new THREE.HemisphereLight(0xffffff, 0xaeb3bb, 0.9));
+  const sun = new THREE.DirectionalLight(0xffffff, 0.85);
+  sun.position.set(-2, 9, 6.5);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(2048, 2048);
+  Object.assign(sun.shadow.camera, { left: -6, right: 6, top: 6, bottom: -6, near: 1, far: 25 });
+  sun.shadow.bias = -0.0006;
+  scene.add(sun);
+
+  // Zemin: yalnızca gölgeyi gösteren şeffaf düzlem + altında yumuşak bir leke
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(60, 60), new THREE.ShadowMaterial({ opacity: 0.17 }));
+  floor.rotation.x = -Math.PI / 2;
+  floor.position.y = FLOOR_Y;
+  floor.receiveShadow = true;
+  scene.add(floor);
+
+  const blot = new THREE.Mesh(
+    new THREE.CircleGeometry(5.5, 48),
+    new THREE.MeshBasicMaterial({ map: radialTexture('rgba(150,156,166,0.22)', 'rgba(150,156,166,0)'), transparent: true, depthWrite: false })
+  );
+  blot.rotation.x = -Math.PI / 2;
+  blot.position.y = FLOOR_Y - 0.002;
+  scene.add(blot);
+
+  // Kamera kontrolü: sürükle = döndür, tekerlek / iki parmak = yakınlaştır
+  const controls = new THREE.OrbitControls(camera, canvas);
+  controls.target.copy(camTarget);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+  controls.enablePan = false;
+  controls.minDistance = 4;
+  controls.maxDistance = 24;
+  controls.update();
+
+  /* =========================================================
+     3) MALZEMELER (mat siyah / koyu gri, çizgi film tarzı)
+     ========================================================= */
+  const mat = (color, roughness, metalness = 0.1) =>
+    new THREE.MeshStandardMaterial({ color, roughness, metalness, flatShading: true });
+
+  const M = {
+    slide:  mat(0x2e3137, 0.5, 0.25),   // kızak: koyu gri, hafif parlak
+    rib:    mat(0x3a3e45, 0.45, 0.25),  // kızak üstü ince şerit
+    steel:  mat(0x6b717b, 0.35, 0.4),   // namlu yatağı / nişangah
+    frame:  mat(0x17181b, 0.85),        // gövde: mat siyah polimer
+    grip:   mat(0x1e1f23, 0.95),        // kabza
+    panel:  mat(0x27292e, 1.0),         // kabza yan paneli
+    serr:   mat(0x464a52, 0.5, 0.2),    // tırtıklar
+    barrel: mat(0x3d4148, 0.4, 0.4),    // namlu
+    mag:    mat(0x33363c, 0.55, 0.3),   // şarjör gövdesi
+    brass:  mat(0xd2a24c, 0.35, 0.3),   // pirinç
+    copper: mat(0xb8693a, 0.4, 0.3),    // mermi ucu
+    hole:   new THREE.MeshBasicMaterial({ color: 0x07080a }),
+    edge:   new THREE.LineBasicMaterial({ color: 0x9aa1ab, transparent: true, opacity: 0.5 })
+  };
+
+  /* Yardımcı: parça oluştur, ebeveyne ekle, kenar vurgusu çiz */
+  function part(geo, material, parent, x, y, z, o = {}) {
+    const m = new THREE.Mesh(geo, material);
+    m.position.set(x, y, z);
+    if (o.rx) m.rotation.x = o.rx;
+    if (o.ry) m.rotation.y = o.ry;
+    if (o.rz) m.rotation.z = o.rz;
+    m.castShadow = true;
+    if (o.edges !== false) m.add(new THREE.LineSegments(new THREE.EdgesGeometry(geo, 25), M.edge));
+    parent.add(m);
+    return m;
+  }
+  const box = (w, h, d) => new THREE.BoxGeometry(w, h, d);
+  const cylX = (r, len, seg = 12) => new THREE.CylinderGeometry(r, r, len, seg);  // X eksenine çevrilecek
+
+  /* =========================================================
+     4) TABANCA MODELİ (namlu -X yönüne bakar, sağ taraf -Z)
+     ========================================================= */
+  // Geri tepme için dönme noktası kabzanın üst kısmında
+  const PIVOT = new THREE.Vector3(0.8, -0.4, 0);
+  const recoilPivot = new THREE.Group();
+  recoilPivot.position.copy(PIVOT);
+  scene.add(recoilPivot);
+
+  const gun = new THREE.Group();
+  gun.position.copy(PIVOT).negate();
+  recoilPivot.add(gun);
+
+  // --- Gövde (frame) ---
+  part(box(2.5, 0.28, 0.4), M.frame, gun, -0.2, 0.15, 0);          // ana gövde
+  part(box(0.45, 0.24, 0.4), M.frame, gun, 1.17, 0.13, 0);         // arka çıkıntı (beavertail)
+
+  // --- Namlu (sabit, kızak geri gidince öne açılır) ---
+  const barrelZ = Math.PI / 2;
+  part(cylX(0.12, 1.85), M.barrel, gun, -0.6, 0.58, 0, { rz: barrelZ });
+  part(cylX(0.07, 0.02, 10), M.hole, gun, -1.535, 0.58, 0, { rz: barrelZ, edges: false });  // namlu ağzı
+
+  // --- Kızak (slide) — ayrı grup, ateşte geri-ileri gider ---
+  const slide = new THREE.Group();
+  gun.add(slide);
+  part(box(3.0, 0.5, 0.44), M.slide, slide, 0, 0.55, 0);           // kızak gövdesi
+  part(box(2.8, 0.05, 0.26), M.rib, slide, 0.02, 0.825, 0);         // üst şerit (parlak vurgu)
+  part(box(0.12, 0.09, 0.08), M.steel, slide, -1.3, 0.89, 0);       // arpacık
+  part(box(0.16, 0.04, 0.34), M.slide, slide, 1.3, 0.865, 0);       // gez tabanı
+  part(box(0.16, 0.11, 0.1), M.steel, slide, 1.3, 0.92, 0.12);      // gez sol kulak
+  part(box(0.16, 0.11, 0.1), M.steel, slide, 1.3, 0.92, -0.12);     // gez sağ kulak
+
+  // Kızak üzerindeki tırtıklı çizgiler (ön kısımda, iki yanda)
+  for (let i = 0; i < 7; i++) {
+    part(box(0.035, 0.3, 0.452), M.serr, slide, -1.22 + i * 0.075, 0.53, 0);
+  }
+
+  // Sağ taraftaki boş kovan penceresi + üstteki açık gri namlu yatağı
+  part(box(0.6, 0.22, 0.012), M.hole, slide, 0.02, 0.66, -0.224, { edges: false });
+  part(box(0.6, 0.02, 0.24), M.steel, slide, 0.02, 0.858, -0.02);
+
+  const ejectPoint = new THREE.Object3D();          // kovanın çıkış noktası
+  ejectPoint.position.set(0.02, 0.74, -0.26);
+  slide.add(ejectPoint);
+
+  // --- Kabza (grip) — eğimli ---
+  const GRIP_POS = new THREE.Vector3(0.82, -0.62, 0);
+  part(box(0.78, 1.5, 0.46), M.grip, gun, GRIP_POS.x, GRIP_POS.y, 0, { rz: GRIP_TILT });
+  const panel = part(box(0.54, 1.02, 0.472), M.panel, gun, GRIP_POS.x, GRIP_POS.y, 0, { rz: GRIP_TILT });
+  panel.position.x += 0.04; panel.position.y -= 0.12;
+
+  // --- Tetik korkuluğu ---
+  part(box(0.84, 0.08, 0.2), M.frame, gun, -0.01, -0.42, 0);        // alt çubuk
+  part(box(0.08, 0.44, 0.2), M.frame, gun, -0.4, -0.19, 0, { rz: -0.12 }); // ön dikme
+  part(cylX(0.06, 0.2, 10), M.frame, gun, -0.38, -0.41, 0, { rx: Math.PI / 2, edges: false }); // yuvarlak köşe
+
+  // --- Tetik (üstten menteşeli) ---
+  const trigger = new THREE.Group();
+  trigger.position.set(0.04, 0.02, 0);
+  gun.add(trigger);
+  part(box(0.09, 0.2, 0.09), M.frame, trigger, 0, -0.1, 0);
+  part(box(0.09, 0.16, 0.09), M.frame, trigger, -0.04, -0.25, 0, { rz: -0.45 });
+
+  // --- Şarjör yuvası: kabza ile aynı eğimde, şarjör bunun içinde kayar ---
+  const magWell = new THREE.Group();
+  magWell.position.copy(GRIP_POS);
+  magWell.rotation.z = GRIP_TILT;
+  gun.add(magWell);
+
+  function makeMagazine(loaded) {
+    const g = new THREE.Group();
+    part(box(0.5, 1.45, 0.3), M.mag, g, 0.02, -0.02, 0);             // gövde (kabzanın içinde gizli)
+    part(box(0.66, 0.1, 0.42), M.frame, g, 0.02, -0.8, 0);           // taban plakası (görünen kısım)
+    if (loaded) {                                                    // üstteki mermi
+      const r = part(cylX(0.075, 0.26, 10), M.brass, g, 0.0, 0.76, 0, { rz: Math.PI / 2 - GRIP_TILT, edges: false });
+      r.name = 'round';
+      const tip = new THREE.Mesh(new THREE.ConeGeometry(0.075, 0.14, 10), M.copper);
+      tip.position.y = 0.2;
+      r.add(tip);
+    }
+    return g;
+  }
+  let magazine = makeMagazine(true);
+  magWell.add(magazine);
+
+  // --- Namlu ağzı parlaması: yıldız sprite + koni + turuncu ışık ---
+  const MUZZLE = new THREE.Vector3(-1.56, 0.58, 0);
+  const flash = new THREE.Group();
+  flash.position.copy(MUZZLE);
+  flash.visible = false;
+  gun.add(flash);
+
+  const flashSprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: starTexture(), transparent: true, depthWrite: false }));
+  flashSprite.position.x = -0.35;
+  flash.add(flashSprite);
+
+  const coneOuter = new THREE.Mesh(new THREE.ConeGeometry(0.2, 0.8, 8),
+    new THREE.MeshBasicMaterial({ color: 0xff9a2e, transparent: true, opacity: 0.85, depthWrite: false }));
+  coneOuter.rotation.z = Math.PI / 2;     // ucu -X yönüne
+  coneOuter.position.x = -0.4;
+  flash.add(coneOuter);
+  const coneInner = new THREE.Mesh(new THREE.ConeGeometry(0.1, 0.5, 8),
+    new THREE.MeshBasicMaterial({ color: 0xfff1a0, depthWrite: false }));
+  coneInner.rotation.z = Math.PI / 2;
+  coneInner.position.x = -0.25;
+  flash.add(coneInner);
+
+  // Işık baştan sahnede (yoğunluk 0) — ilk atışta shader yeniden derlenmesin
+  const flashLight = new THREE.PointLight(0xffa040, 0, 6, 2);
+  flashLight.position.copy(MUZZLE).add(new THREE.Vector3(-0.4, 0, 0));
+  gun.add(flashLight);
+
+  /* =========================================================
+     5) DOKULAR (canvas ile üretilir, harici dosya yok)
+     ========================================================= */
+  function starTexture() {
+    const c = document.createElement('canvas');
+    c.width = c.height = 128;
+    const g = c.getContext('2d');
+    const grd = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+    grd.addColorStop(0, 'rgba(255,255,235,1)');
+    grd.addColorStop(0.3, 'rgba(255,214,90,1)');
+    grd.addColorStop(0.65, 'rgba(255,138,30,0.75)');
+    grd.addColorStop(1, 'rgba(255,100,0,0)');
+    g.fillStyle = grd;
+    g.beginPath();
+    const n = 18;                        // 9 sivri uçlu yıldız
+    for (let i = 0; i < n; i++) {
+      const r = i % 2 ? 24 : 62;
+      const a = (i / n) * Math.PI * 2;
+      g.lineTo(64 + Math.cos(a) * r, 64 + Math.sin(a) * r);
+    }
+    g.closePath();
+    g.fill();
+    return new THREE.CanvasTexture(c);
+  }
+
+  function radialTexture(inner, outer) {
+    const c = document.createElement('canvas');
+    c.width = c.height = 128;
+    const g = c.getContext('2d');
+    const grd = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+    grd.addColorStop(0, inner);
+    grd.addColorStop(1, outer);
+    g.fillStyle = grd;
+    g.fillRect(0, 0, 128, 128);
+    return new THREE.CanvasTexture(c);
+  }
+
+  /* =========================================================
+     6) SES (Web Audio API ile sentez)
+     ========================================================= */
+  let actx = null, out = null, noise = null;
+
+  // Tarayıcılar sesi ancak kullanıcı etkileşiminden sonra başlatır
+  function ensureAudio() {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    if (!actx) {
+      actx = new AC();
+      const comp = actx.createDynamicsCompressor();   // art arda atışlarda patlamayı önler
+      out = actx.createGain();
+      out.gain.value = 0.8;
+      out.connect(comp).connect(actx.destination);
+      // Tekrar kullanılacak beyaz gürültü tamponu
+      noise = actx.createBuffer(1, Math.floor(actx.sampleRate * 0.6), actx.sampleRate);
+      const d = noise.getChannelData(0);
+      for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    }
+    if (actx.state === 'suspended') actx.resume();
+  }
+
+  // "Bang": düşen filtreli gürültü + kısa, aşağı kayan bas darbesi
+  function soundBang() {
+    if (!actx) return;
+    const t = actx.currentTime;
+
+    const src = actx.createBufferSource();
+    src.buffer = noise;
+    const lp = actx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.setValueAtTime(8000, t);
+    lp.frequency.exponentialRampToValueAtTime(250, t + 0.3);
+    const g = actx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(1, t + 0.003);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
+    src.connect(lp).connect(g).connect(out);
+    src.start(t);
+    src.stop(t + 0.4);
+
+    const osc = actx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(160, t);
+    osc.frequency.exponentialRampToValueAtTime(42, t + 0.18);
+    const og = actx.createGain();
+    og.gain.setValueAtTime(0.9, t);
+    og.gain.exponentialRampToValueAtTime(0.001, t + 0.2);
+    osc.connect(og).connect(out);
+    osc.start(t);
+    osc.stop(t + 0.22);
+  }
+
+  // "Tık": çok kısa, tiz metalik ses (vol ile kısılabilir)
+  function soundClick(vol = 1) {
+    if (!actx) return;
+    const t = actx.currentTime;
+
+    const src = actx.createBufferSource();
+    src.buffer = noise;
+    const hp = actx.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.value = 2500;
+    const g = actx.createGain();
+    g.gain.setValueAtTime(0.5 * vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.035);
+    src.connect(hp).connect(g).connect(out);
+    src.start(t);
+    src.stop(t + 0.05);
+
+    const osc = actx.createOscillator();
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(2300, t);
+    osc.frequency.exponentialRampToValueAtTime(1200, t + 0.02);
+    const og = actx.createGain();
+    og.gain.setValueAtTime(0.12 * vol, t);
+    og.gain.exponentialRampToValueAtTime(0.001, t + 0.025);
+    osc.connect(og).connect(out);
+    osc.start(t);
+    osc.stop(t + 0.03);
+  }
+
+  /* =========================================================
+     7) BASİT ANİMASYON SİSTEMİ (Promise döndüren tween'ler)
+     ========================================================= */
+  const tweens = [];
+  const easeOut = p => 1 - (1 - p) * (1 - p);
+  const easeIn  = p => p * p;
+
+  function tween(ms, fn, ease = p => p) {
+    return new Promise(resolve => tweens.push({ t: 0, d: ms / 1000, fn, ease, resolve }));
+  }
+  const wait = ms => tween(ms, () => {});
+
+  function updateTweens(dt) {
+    for (let i = tweens.length - 1; i >= 0; i--) {
+      const tw = tweens[i];
+      tw.t += dt;
+      const p = Math.min(tw.t / tw.d, 1);
+      tw.fn(tw.ease(p));
+      if (p >= 1) { tweens.splice(i, 1); tw.resolve(); }
+    }
+  }
+
+  /* =========================================================
+     8) ATEŞ ETME
+     ========================================================= */
+  // Geri tepme: tüm silahı yukarı sarsan küçük bir yay (spring) sistemi
+  const recoil = { a: 0, v: 0 };
+  function kick() { recoil.v -= 3.6; }   // negatif açı = namlu yukarı
+
+  function updateRecoil(dt) {
+    const steps = 4, h = dt / steps;     // kararlılık için alt adımlar
+    for (let i = 0; i < steps; i++) {
+      recoil.v += (-420 * recoil.a - 24 * recoil.v) * h;
+      recoil.a += recoil.v * h;
+    }
+    recoilPivot.rotation.z = recoil.a;
+    recoilPivot.position.x = PIVOT.x - recoil.a * 0.5;   // hafifçe geriye
+    recoilPivot.position.y = PIVOT.y - recoil.a * 0.15;  // ve yukarıya
+  }
+
+  function pullTrigger() {
+    tween(40, p => trigger.rotation.z = 0.28 * p)
+      .then(() => tween(120, p => trigger.rotation.z = 0.28 * (1 - p)));
+  }
+
+  // Namlu ağzı parlaması: ~55 ms görünür, ışık ~90 ms'de söner
+  let flashTime = -1;
+  function muzzleFlash() {
+    flash.visible = true;
+    flashTime = 0;
+    const s = 0.8 + Math.random() * 0.4;
+    flashSprite.scale.set(s, s, s);
+    flashSprite.material.rotation = Math.random() * Math.PI;
+    coneOuter.scale.set(1, 0.85 + Math.random() * 0.4, 1);
+  }
+  function updateFlash(dt) {
+    if (flashTime < 0) return;
+    flashTime += dt;
+    if (flashTime > 0.055) flash.visible = false;
+    flashLight.intensity = Math.max(0, 3 * (1 - flashTime / 0.09));
+    if (flashTime > 0.09) flashTime = -1;
+  }
+
+  function tryFire() {
+    if (state.reloading || state.cycling) return;
+    pullTrigger();
+
+    // Şarjör boş: sadece "tık", kızak geride kalır
+    if (state.ammo <= 0) { soundClick(1); return; }
+
+    state.ammo--;
+    const lastRound = state.ammo === 0;
+    soundBang();
+    muzzleFlash();
+    kick();
+    updateHud();
+
+    // Kızak hızla geri gider, kovan atılır, sonra yay ile öne döner
+    state.cycling = true;
+    tween(40, p => slide.position.x = SLIDE_BACK * p, easeOut)
+      .then(() => {
+        ejectShell();
+        if (lastRound) { state.slideLocked = true; return; }   // geride kilitlen
+        return tween(85, p => slide.position.x = SLIDE_BACK * (1 - p), easeIn);
+      })
+      .then(() => { state.cycling = false; });
+  }
+
+  /* =========================================================
+     9) BOŞ KOVANLAR (basit fizik: yerçekimi + zıplama + kaybolma)
+     ========================================================= */
+  const shellGeo = new THREE.CylinderGeometry(0.05, 0.05, 0.17, 10);
+  const shells = [];
+  const tmp = new THREE.Vector3();
+
+  function ejectShell() {
+    const m = new THREE.Mesh(shellGeo, M.brass.clone());
+    m.material.transparent = true;
+    m.castShadow = true;
+    m.rotation.order = 'YXZ';
+    ejectPoint.getWorldPosition(m.position);
+    m.rotation.set(Math.PI / 2, Math.random() * Math.PI, 0);
+    scene.add(m);
+    shells.push({
+      m, age: 0, landed: false,
+      v: new THREE.Vector3(0.9 + Math.random() * 0.6, 3.8 + Math.random() * 0.8, -2.3 - Math.random() * 0.8), // yukarı + sağa
+      spin: new THREE.Vector3(14 + Math.random() * 8, 6 * Math.random(), 10 + Math.random() * 8)
+    });
+    if (shells.length > 30) removeShell(0);   // sahnede çok birikmesin
+  }
+
+  function removeShell(i) {
+    const s = shells[i];
+    scene.remove(s.m);
+    s.m.material.dispose();
+    shells.splice(i, 1);
+  }
+
+  function updateShells(dt) {
+    for (let i = shells.length - 1; i >= 0; i--) {
+      const s = shells[i];
+      s.age += dt;
+      s.v.y -= GRAVITY * dt;
+      s.m.position.addScaledVector(s.v, dt);
+
+      if (!s.landed) {                       // havada dönerek uçar
+        s.m.rotation.x += s.spin.x * dt;
+        s.m.rotation.z += s.spin.z * dt;
+      }
+      s.m.rotation.y += s.spin.y * dt;
+
+      // Zemine çarpma: yatık konuma geç, sek, sürtünmeyle dur
+      const restY = FLOOR_Y + 0.05;
+      if (s.m.position.y < restY) {
+        s.m.position.y = restY;
+        s.landed = true;
+        s.m.rotation.x = Math.PI / 2;
+        s.m.rotation.z = 0;
+        s.v.y = Math.abs(s.v.y) > 0.6 ? -s.v.y * 0.35 : 0;
+        s.v.x *= 0.55; s.v.z *= 0.55;
+        s.spin.y *= 0.6;
+      }
+      if (s.landed && s.v.y === 0) {
+        s.v.x *= 1 - Math.min(1, 4 * dt);
+        s.v.z *= 1 - Math.min(1, 4 * dt);
+        s.spin.y *= 1 - Math.min(1, 3 * dt);
+      }
+
+      // 2.6 sn sonra 0.5 sn içinde kaybol
+      if (s.age > 2.6) s.m.material.opacity = Math.max(0, 1 - (s.age - 2.6) / 0.5);
+      if (s.age > 3.1) removeShell(i);
+    }
+  }
+
+  /* =========================================================
+     10) ŞARJÖR DEĞİŞTİRME
+     ========================================================= */
+  // Düşen eski şarjör: önce kabza ekseninde kayar, sonra serbest düşer,
+  // yere yatar ve bir süre sonra kaybolur.
+  const drops = [];
+
+  function dropMagazine(m) {
+    drops.push({ m, phase: 'slide', off: 0, speed: 1.5, v: new THREE.Vector3(), t: 0 });
+  }
+
+  function updateDrops(dt) {
+    for (let i = drops.length - 1; i >= 0; i--) {
+      const d = drops[i];
+      d.t += dt;
+
+      if (d.phase === 'slide') {
+        // Kabzanın içinden aşağı (yerel -Y) hızlanarak kayar
+        d.speed += GRAVITY * dt;
+        d.off += d.speed * dt;
+        d.m.position.y = -d.off;
+        if (d.off > 1.6) {
+          // Kabzadan çıktı: dünya koordinatına taşı, serbest düşüşe geç
+          scene.attach(d.m);
+          d.m.traverse(o => {
+            if (o.material) { o.material = o.material.clone(); o.material.transparent = true; }
+          });
+          d.v.set(Math.sin(GRIP_TILT) * d.speed + 0.3, -Math.cos(GRIP_TILT) * d.speed, 2.2);
+          d.phase = 'fall';
+        }
+      } else if (d.phase === 'fall') {
+        d.v.y -= GRAVITY * dt;
+        d.m.position.addScaledVector(d.v, dt);
+        d.m.rotation.x += 2.5 * dt;
+        if (d.m.position.y <= FLOOR_Y + 0.21) {
+          // Yere değdi: yan yatmış hedef duruşa yumuşakça dön
+          d.m.position.y = FLOOR_Y + 0.21;
+          d.phase = 'land';
+          d.t = 0;
+          d.q0 = d.m.quaternion.clone();
+          d.q1 = new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI / 2, 0, 0))
+            .premultiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 2 + (Math.random() - 0.5) * 0.6));
+          d.z0 = d.m.position.z;
+        }
+      } else if (d.phase === 'land') {
+        const p = Math.min(d.t / 0.18, 1);
+        d.m.quaternion.slerpQuaternions(d.q0, d.q1, easeOut(p));
+        d.m.position.z = d.z0 + 0.5 * easeOut(p);
+        if (p >= 1) { d.phase = 'rest'; d.t = 0; }
+      } else if (d.phase === 'rest') {
+        // 1.6 sn bekle, 0.5 sn'de silinerek kaybol
+        const fade = Math.max(0, 1 - (d.t - 1.6) / 0.5);
+        d.m.traverse(o => { if (o.material) o.material.opacity = fade; });
+        if (d.t > 2.1) {
+          scene.remove(d.m);
+          d.m.traverse(o => { if (o.material) o.material.dispose(); });
+          drops.splice(i, 1);
+        }
+      }
+    }
+  }
+
+  async function reload() {
+    if (state.reloading || state.cycling) return;
+    if (state.ammo === MAX_AMMO && !state.slideLocked) return;   // zaten dolu
+    state.reloading = true;
+    updateHud();
+
+    // 1) Eski şarjör kabzadan aşağı kayıp düşer
+    const old = magazine;
+    if (state.ammo === 0) old.getObjectByName('round').visible = false;   // boş şarjörde mermi görünmez
+    dropMagazine(old);
+    await wait(550);
+
+    // 2) Yeni şarjör aşağıdan yukarı kayarak yerine oturur
+    magazine = makeMagazine(true);
+    magazine.position.y = -1.6;
+    magWell.add(magazine);
+    await tween(320, p => magazine.position.y = -1.6 * (1 - p), easeOut);
+    soundClick(0.5);
+    state.ammo = MAX_AMMO;
+    await wait(150);
+
+    // 3) Kızak bir kez ileri gider (kilitli değilse önce geri çekilir)
+    if (!state.slideLocked) await tween(70, p => slide.position.x = SLIDE_BACK * p, easeOut);
+    await tween(90, p => slide.position.x = SLIDE_BACK * (1 - p), easeIn);
+    state.slideLocked = false;
+    soundClick(0.7);
+
+    state.reloading = false;
+    updateHud();
+  }
+
+  /* =========================================================
+     11) ARAYÜZ
+     ========================================================= */
+  const ammoEl = document.getElementById('ammo');
+  const ammoNow = document.getElementById('ammoNow');
+  const ammoWarn = document.getElementById('ammoWarn');
+  document.getElementById('ammoMax').textContent = MAX_AMMO;
+
+  if (isTouch) {
+    document.getElementById('hints').innerHTML = 'Sürükle: Döndür<i>|</i>İki parmak: Yakınlaştır';
+    ammoWarn.textContent = 'ŞARJÖR ile değiştir';
+  }
+
+  function updateHud() {
+    ammoNow.textContent = state.ammo;
+    ammoEl.classList.toggle('low', state.ammo <= 3);
+    ammoEl.classList.toggle('busy', state.reloading);
+    ammoWarn.hidden = !(state.ammo === 0 && !state.reloading);
+  }
+  updateHud();
+
+  /* =========================================================
+     12) GİRDİLER: fare, klavye, dokunmatik butonlar
+     ========================================================= */
+  // Sol tık ateş eder; sürükleme ise döndürür. Ayırmak için fare
+  // basıldığı yerden neredeyse hiç kıpırdamadan bırakılmalı.
+  let press = null;
+  canvas.addEventListener('pointerdown', e => {
+    ensureAudio();
+    if (e.pointerType === 'mouse' && e.button === 0) press = { x: e.clientX, y: e.clientY };
+  });
+  canvas.addEventListener('pointerup', e => {
+    if (!press || e.pointerType !== 'mouse' || e.button !== 0) return;
+    if (Math.hypot(e.clientX - press.x, e.clientY - press.y) < 6) tryFire();
+    press = null;
+  });
+
+  addEventListener('keydown', e => {
+    if (e.code === 'Space') {
+      e.preventDefault();
+      if (!e.repeat) { ensureAudio(); tryFire(); }
+    } else if (e.code === 'KeyR' && !e.repeat) {
+      ensureAudio();
+      reload();
+    }
+  });
+
+  const onPress = (el, fn) => el.addEventListener('pointerdown', e => { e.preventDefault(); ensureAudio(); fn(); });
+  onPress(document.getElementById('btnFire'), tryFire);
+  onPress(document.getElementById('btnReload'), reload);
+
+  addEventListener('resize', () => {
+    camera.aspect = innerWidth / innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+  });
+
+  /* =========================================================
+     13) ANA DÖNGÜ
+     ========================================================= */
+  const clock = new THREE.Clock();
+  renderer.setAnimationLoop(() => {
+    const dt = Math.min(clock.getDelta(), 0.05);
+    updateTweens(dt);
+    updateRecoil(dt);
+    updateFlash(dt);
+    updateShells(dt);
+    updateDrops(dt);
+    controls.update();
+    renderer.render(scene, camera);
+  });
+})();
+</script>
+</body>
+</html>
